@@ -1,0 +1,17 @@
+[package]
+name = "finviz_sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints.rust]
+unsafe_code = "deny"
+
+[dependencies]
+utils.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+urlencoding.workspace = true
+
+# —— finviz_sdk 专用依赖(仅本 crate 使用,不进 workspace)——
+csv = "1.4"
