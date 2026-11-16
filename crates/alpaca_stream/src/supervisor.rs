@@ -50,6 +50,12 @@ pub(crate) trait Protocol: Send + Sync + 'static {
 
     fn url(&self) -> String;
 
+    /// SOCKS5 代理地址(`socks5://host:port`);`None` = 直连。代理是
+    /// [`ws::connect_ws`] 内部的建链细节,重连自动走同一配置。
+    fn proxy(&self) -> Option<String> {
+        None
+    }
+
     /// 升级请求附加头(新闻流放 APCA key;股票流为空)。
     fn upgrade_headers(&self) -> Vec<(String, String)> {
         Vec::new()
@@ -82,8 +88,12 @@ pub(crate) async fn attempt_connect<P: Protocol>(
     match tokio::time::timeout(
         ws::CONNECT_TIMEOUT,
         async {
-            let (mut write, mut read) =
-                ws::connect_ws(&protocol.url(), &protocol.upgrade_headers()).await?;
+            let (mut write, mut read) = ws::connect_ws(
+                &protocol.url(),
+                &protocol.upgrade_headers(),
+                protocol.proxy().as_deref(),
+            )
+            .await?;
             protocol.handshake(&mut write, &mut read).await?;
             Ok((write, read))
         },

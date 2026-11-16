@@ -82,6 +82,36 @@ stream.close(); // 显式关闭(幂等);不调用则重连直到最后一个句�
 
 `Feed`:`Sip` / `Iex` / `Otc`(WS 不可用)/ `DelayedSip` / `Boats` / `Overnight`。
 
+## 代理(SOCKS5)
+
+WS 的 TCP 链路可以经过 **SOCKS5 代理**建立(直连不稳 / 本地 DNS 被污染时有用):
+代理只介入 TCP 建连阶段,目标域名交给**代理端**解析,其上的 TLS 与 WS 升级、
+握手、订阅重放完全不变;断线重连自动走同一代理配置。
+
+```rust
+use anysdk::alpaca_stream::{NEWS_STREAM_URL, STOCK_STREAM_URL};
+
+// 显式指定代理;None = 直连
+let stream = StockStream::connect_with_url_and_proxy(
+    STOCK_STREAM_URL, Feed::Iex, "KEY", "SECRET",
+    Some("socks5://127.0.0.1:7890".into()),
+).await?;
+
+let news = NewsStream::connect_to_with_proxy(
+    NEWS_STREAM_URL, "KEY", "SECRET",
+    Some("socks5://127.0.0.1:7890".into()),
+).await?;
+```
+
+规则:
+
+- 仅支持 `socks5://host:port`(接受 `socks5h://`,语义相同),**不支持认证**;
+  scheme 或地址非法时首连直接报错(fail-fast)。
+- 显式参数**优先**于环境变量;未提供时读 `ALL_PROXY` / `all_proxy` 兜底——
+  仅当值为 `socks5://` / `socks5h://` 时生效,其他 scheme(如 `http://…`)
+  **静默忽略保持直连**,不会因其他工具设置的变量弄断流。
+- 代理握手耗时计入单次连接的 `CONNECT_TIMEOUT`(15s),不单独放宽。
+
 ## 新闻流(NewsStream)
 
 ```rust

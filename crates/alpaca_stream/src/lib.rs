@@ -22,6 +22,10 @@
 //! - [`StreamStatus::Reconnecting`] 携带第几次重试与本次退避时长,GUI 可展示。
 //! - [`StockStream`] / [`NewsStream`] 的 `Clone` 共享同一连接;最后一个句柄
 //!   drop 等价于 [`close`](StockStream::close)。
+//! - **SOCKS5 代理可选**:显式入口(`connect_with_url_and_proxy` /
+//!   `connect_to_with_proxy`)优先,未提供时读 `ALL_PROXY` / `all_proxy` 兜底
+//!   (仅 socks5 scheme);代理只介入 TCP 建链,域名解析发生在代理端,重连
+//!   自动走同一配置。
 
 pub mod news;
 pub mod stocks;

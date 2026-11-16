@@ -69,6 +69,7 @@ struct NewsProtocol {
     url: String,
     key_id: String,
     secret: String,
+    proxy: Option<String>,
 }
 
 fn action_json(action: &str, symbols: &[String]) -> String {
@@ -82,6 +83,10 @@ impl Protocol for NewsProtocol {
 
     fn url(&self) -> String {
         self.url.clone()
+    }
+
+    fn proxy(&self) -> Option<String> {
+        self.proxy.clone()
     }
 
     /// 新闻流的认证走升级请求头。
@@ -159,10 +164,23 @@ impl NewsStream {
         key_id: impl Into<String>,
         secret: impl Into<String>,
     ) -> anyhow::Result<Self> {
+        Self::connect_to_with_proxy(url, key_id, secret, None).await
+    }
+
+    /// [`connect_to`] 的代理版本。`proxy` 为 `socks5://host:port`
+    /// (SOCKS5,无认证;域名解析发生在代理端);`None` = 直连。显式传入时
+    /// 优先于 `ALL_PROXY` / `all_proxy` 环境变量(后者仅在 socks5 scheme 时生效)。
+    pub async fn connect_to_with_proxy(
+        url: &str,
+        key_id: impl Into<String>,
+        secret: impl Into<String>,
+        proxy: Option<String>,
+    ) -> anyhow::Result<Self> {
         let protocol = Arc::new(NewsProtocol {
             url: url.to_string(),
             key_id: key_id.into(),
             secret: secret.into(),
+            proxy,
         });
 
         let first = supervisor::attempt_connect(protocol.as_ref())

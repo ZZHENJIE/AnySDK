@@ -360,6 +360,7 @@ struct StockProtocol {
     url: String,
     key_id: String,
     secret: String,
+    proxy: Option<String>,
 }
 
 fn action_json(action: &str, subscription: &StockSubscription) -> String {
@@ -377,6 +378,10 @@ impl Protocol for StockProtocol {
 
     fn url(&self) -> String {
         self.url.clone()
+    }
+
+    fn proxy(&self) -> Option<String> {
+        self.proxy.clone()
     }
 
     async fn handshake(&self, write: &mut crate::ws::WsWriter, read: &mut crate::ws::WsReader) -> anyhow::Result<()> {
@@ -453,6 +458,19 @@ impl StockStream {
         key_id: impl Into<String>,
         secret: impl Into<String>,
     ) -> anyhow::Result<Self> {
+        Self::connect_with_url_and_proxy(url_base, feed, key_id, secret, None).await
+    }
+
+    /// [`connect_with_url`] 的代理版本。`proxy` 为 `socks5://host:port`
+    /// (SOCKS5,无认证;域名解析发生在代理端);`None` = 直连。显式传入时
+    /// 优先于 `ALL_PROXY` / `all_proxy` 环境变量(后者仅在 socks5 scheme 时生效)。
+    pub async fn connect_with_url_and_proxy(
+        url_base: &str,
+        feed: Feed,
+        key_id: impl Into<String>,
+        secret: impl Into<String>,
+        proxy: Option<String>,
+    ) -> anyhow::Result<Self> {
         let path = feed
             .path()
             .context("stock stream: feed not available on the WebSocket")?;
@@ -460,6 +478,7 @@ impl StockStream {
             url: format!("{url_base}/{path}"),
             key_id: key_id.into(),
             secret: secret.into(),
+            proxy,
         });
 
         let first = supervisor::attempt_connect(protocol.as_ref())
