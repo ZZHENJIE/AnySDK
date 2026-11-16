@@ -14,9 +14,9 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use alpaca_sdk::{bars, news, quotes, snapshots, Feed};
-use finviz_sdk::screener::{Parameter, ScreenerType};
+use alpaca_sdk::{Feed, bars, news, quotes, snapshots};
 use finviz_sdk::calendar::economic::Parameter as EconomicParameter;
+use finviz_sdk::screener::{Parameter, ScreenerType};
 use utils::{HttpExecutor, HttpResponse, Method};
 
 // ---------- 执行器:唯一的 reqwest 落点 ----------
@@ -39,9 +39,7 @@ impl HttpExecutor<reqwest::Client> for ReqwestExecutor {
                 builder.send().await?
             }
             Method::Post(request) => {
-                let mut builder = client
-                    .post(&request.url)
-                    .body(request.body.clone());
+                let mut builder = client.post(&request.url).body(request.body.clone());
                 for (key, value) in &request.headers {
                     builder = builder.header(key.as_str(), value.as_str());
                 }
@@ -128,7 +126,11 @@ async fn run_alpaca_bars() -> anyhow::Result<()> {
         })
         .await?;
     for (symbol, bars) in &page.bars {
-        println!("{symbol}: {} bars, first close = {:?}", bars.len(), bars.first().map(|b| b.close));
+        println!(
+            "{symbol}: {} bars, first close = {:?}",
+            bars.len(),
+            bars.first().map(|b| b.close)
+        );
     }
     println!("next page: {:?}", page.next_page_token);
     Ok(())
@@ -160,7 +162,10 @@ async fn run_alpaca_latest_quotes() -> anyhow::Result<()> {
         })
         .await?;
     for (symbol, quote) in &latest.quotes {
-        println!("{symbol}: bid {} x ask {}", quote.bid_price, quote.ask_price);
+        println!(
+            "{symbol}: bid {} x ask {}",
+            quote.bid_price, quote.ask_price
+        );
     }
     Ok(())
 }
@@ -223,39 +228,58 @@ async fn run_alpaca_news_all() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_alpaca_stock_stream() -> anyhow::Result<()> {
-    let stream = alpaca_stream::StockStream::connect(
-        Feed::Iex,
-        alpaca_api_key()?,
-        alpaca_api_secret()?,
-    )
-    .await?;
+/// 本地设备时间,用于对照行情时间戳观察链路停顿。
+fn local_now() -> String {
+    chrono::Local::now().format("%H:%M:%S%.3f").to_string()
+}
 
-    // 状态事件后台打印;消息收 5 条后显式关闭。
+async fn run_alpaca_stock_stream() -> anyhow::Result<()> {
+    let stream =
+        alpaca_stream::StockStream::connect(Feed::Sip, alpaca_api_key()?, alpaca_api_secret()?)
+            .await?;
+
+    // 连接性观察:状态事件带本地时间打印,便于和重连时刻对照。
     let mut status_rx = stream.status();
     tokio::spawn(async move {
         while let Ok(event) = status_rx.recv().await {
-            println!("[status] {event:?}");
+            println!("[{}] [status] {event:?}", local_now());
         }
     });
 
+    // quotes 盘前也持续有流,适合任意时段冒烟(trade 盘中才有)。
     stream
         .subscribe(&alpaca_stream::StockSubscription {
-            trades: vec!["AAPL".into()],
+            quotes: vec!["SPY".into()],
             ..Default::default()
         })
         .await?;
+
+    // 持续打印行情,不自动结束(Ctrl+C 退出);方括号内是本地设备时间。
     let mut receiver = stream.messages();
-    for _ in 0..5 {
-        let message = tokio::time::timeout(Duration::from_secs(30), receiver.recv()).await;
-        match message {
-            Ok(Ok(msg)) => println!("{msg:?}"),
-            Ok(Err(err)) => anyhow::bail!("stream closed: {err}"),
-            Err(_) => anyhow::bail!("timed out waiting for stream messages"),
+    loop {
+        match receiver.recv().await {
+            Ok(alpaca_stream::StockMessage::Quote(q)) => println!(
+                "[{}] SPY bid {:.2}({})x{} / ask {:.2}({})x{} | feed {}",
+                local_now(),
+                q.bid_price,
+                q.bid_exchange,
+                q.bid_size,
+                q.ask_price,
+                q.ask_exchange,
+                q.ask_size,
+                q.time.format("%H:%M:%S%.6fZ")
+            ),
+            Ok(alpaca_stream::StockMessage::Subscription(_)) => {}
+            // broadcast 落后(打印太慢被丢帧)只提示,不断流。
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                println!("[{}] [warn] receiver lagged, dropped {n} messages", local_now());
+            }
+            Ok(msg) => println!("[{}] {msg:?}", local_now()),
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                anyhow::bail!("stream closed")
+            }
         }
     }
-    stream.close();
-    Ok(())
 }
 
 async fn run_alpaca_news_stream() -> anyhow::Result<()> {
@@ -321,7 +345,10 @@ async fn run_finviz_earnings_calendar() -> anyhow::Result<()> {
     let client = finviz_client()?;
     let items = client.earnings_calendar("2026-01-14").await?;
     for item in items.iter().take(10) {
-        println!("{} {}: EPS est {:?}", item.date, item.symbol, item.eps_estimate);
+        println!(
+            "{} {}: EPS est {:?}",
+            item.date, item.symbol, item.eps_estimate
+        );
     }
     Ok(())
 }
@@ -405,7 +432,10 @@ fn registry() -> BTreeMap<&'static str, Runner> {
             "alpaca:snapshot_single",
             (|| Box::pin(run_alpaca_snapshot_single()) as _) as Runner,
         ),
-        ("alpaca:bars", (|| Box::pin(run_alpaca_bars()) as _) as Runner),
+        (
+            "alpaca:bars",
+            (|| Box::pin(run_alpaca_bars()) as _) as Runner,
+        ),
         (
             "alpaca:bars_single_all",
             (|| Box::pin(run_alpaca_bars_single_all()) as _) as Runner,
@@ -426,7 +456,10 @@ fn registry() -> BTreeMap<&'static str, Runner> {
             "alpaca:condition_codes",
             (|| Box::pin(run_alpaca_condition_codes()) as _) as Runner,
         ),
-        ("alpaca:news", (|| Box::pin(run_alpaca_news()) as _) as Runner),
+        (
+            "alpaca:news",
+            (|| Box::pin(run_alpaca_news()) as _) as Runner,
+        ),
         (
             "alpaca:news_all",
             (|| Box::pin(run_alpaca_news_all()) as _) as Runner,
