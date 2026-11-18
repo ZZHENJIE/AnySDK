@@ -1,6 +1,6 @@
 # Alpaca SDK
 
-`alpaca_sdk` 封装 Alpaca Market Data API(**data-only**,无交易)—— 纯 HTTP/REST:历史 bars / quotes / trades / auctions、最新值、快照、元数据、新闻。
+`alpaca_sdk` 封装 Alpaca Market Data API(**data-only**,无交易)—— 纯 HTTP/REST:历史 bars / quotes / trades / auctions、最新值、快照、元数据、新闻、标的列表(assets)。
 
 > 实时 WebSocket 流在独立的 [Alpaca Stream](alpaca_stream.md) 页面。客户端不绑定任何 HTTP 实现:构造时传入你的 HTTP 客户端与 `HttpExecutor` 执行器(接入方式见[首页](/))。
 
@@ -50,7 +50,7 @@ let client = client.with_data_url("https://paper-api.alpaca.markets");
 | `latest_<域>(&params)` | 多标的最新值 |
 | `latest_<域去掉 s>(symbol)` | 单标的最新值 |
 
-域:`bars` / `quotes` / `trades` / `auctions`(无 latest 变体)、`snapshots`(`snapshots` / `snapshot`)、`news`(`news` / `news_all`)。
+域:`bars` / `quotes` / `trades` / `auctions`(无 latest 变体)、`snapshots`(`snapshots` / `snapshot`)、`news`(`news` / `news_all`)、`assets`(`assets`,单方法:GET /v2/assets 全量数组、无翻页)。
 
 ## 历史数据示例
 
@@ -130,6 +130,12 @@ let page = client.news(&news::Params {
     ..Default::default()
 }).await?;
 let all = client.news_all(&news::Params::default()).await?;
+
+// 标的列表(GET /v2/assets:单次返回全量数组,无翻页)
+let assets = client.assets(&anysdk::alpaca_sdk::assets::Params {
+    status: Some("active".into()),
+    asset_class: Some("us_equity".into()),
+}).await?;
 ```
 
 ## 错误行为

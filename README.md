@@ -141,6 +141,12 @@ async fn main() -> anyhow::Result<()> {
     // 新闻(REST)
     let page = client.news(&news::Params::default()).await?;
 
+    // 标的列表(GET /v2/assets:全量数组、无翻页)
+    let assets = client.assets(&anysdk::alpaca_sdk::assets::Params {
+        status: Some("active".into()),
+        asset_class: Some("us_equity".into()),
+    }).await?;
+
     // 实时流(WS):自愈式长连接 —— 断线自动重连 + 订阅自动重放 + 保活
     let stream = anysdk::alpaca_stream::StockStream::connect(Feed::Iex, "KEY", "SECRET").await?;
     // 连接状态事件(Connected / Reconnecting{attempt,delay} /

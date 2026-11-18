@@ -8,7 +8,7 @@
 //!
 //! 接口范围(以 Alpaca market data 规范为准,全覆盖):
 //! bars / quotes / trades / auctions(历史 + latest,多标的 / 单标的)、
-//! snapshots、meta(condition / exchange codes)、news(REST)。
+//! snapshots、meta(condition / exchange codes)、news(REST)、assets(标的列表)。
 //!
 //! 本 SDK 只解析数据:响应 JSON 按字段名反序列化为类型化结构体,不做任何
 //! 语义转换;时间字段保持 API 原始值(`DateTime<Utc>` 为 serde 反序列化的
@@ -18,6 +18,7 @@
 //! = 单标的;`latest_<域>` = 多标的最新值;`latest_<域去掉 s>(symbol)` = 单标的最新值。
 
 pub mod auctions;
+pub mod assets;
 pub mod bars;
 pub mod meta;
 pub mod news;
