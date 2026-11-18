@@ -37,7 +37,7 @@ StockStream / NewsStream 句柄(Clone 廉价,最后一个 drop 自动关闭)
 3. 会话:writer 每 `PING_INTERVAL`(25s)发 WS ping 保活;reader 解码消息并维护最近收帧时间
 4. 连接死亡或下行静默(`STALE_AFTER` = 90s 无任何帧)→ 广播 `Reconnecting{attempt, delay}`
 5. 指数退避重连:1s → 2s → 4s → … → 60s 封顶;重连成功后自动重放订阅并清零退避
-6. 握手阶段收到服务端 **error 帧**(认证失败、订阅不含该 feed、连接数超限等)→ 视为**永久性错误**:广播 `Failed{message}` 并停止重连(重试不可能成功)
+6. 握手阶段收到服务端 **error 帧**(认证失败、订阅不含该 feed、连接数超限等)→ 视为**永久性错误**:广播 `Failed{reason: AuthFailed, message}` 并停止重连(重试不可能成功)
 
 ## 股票流(StockStream)
 
@@ -51,7 +51,7 @@ let stream = StockStream::connect(Feed::Iex, "YOUR_API_KEY", "YOUR_API_SECRET").
 let mut status = stream.status();
 tokio::spawn(async move {
     while let Ok(event) = status.recv().await {
-        println!("[status] {event:?}");   // Connected / Reconnecting{attempt,delay} / Closed
+        println!("[status] {event:?}");   // Connected / Reconnecting{attempt,delay} / Failed{reason,message} / Closed
     }
 });
 
@@ -130,12 +130,16 @@ while let Ok(msg) = rx.recv().await {
 
 ## 行为细则
 
-- **状态事件**(`status()`):`Connected` / `Reconnecting{attempt, delay}` / `Failed{message}`(永久性错误,已停止重连)/ `Closed`(正常关闭)。
+- **状态事件**(`status()`):`Connected` / `Reconnecting{attempt, delay}` / `Failed{reason, message}`(永久性错误,已停止重连)/ `Closed`(正常关闭)。`reason: StatusReason` 供上层决定后续动作:
+  - `AuthFailed` —— 认证/鉴权类永久失败(认证失败、无 feed 权限、连接数超限),重试无意义,SDK 已停止重连,**上层不应再重试**;
+  - `Network` —— 网络断开类,SDK 按指数退避无限重连(以 `Reconnecting` 表达),不会以 `Failed{Network}` 终结;
+  - `Protocol` —— 协议错误类(当前实现按未知消息跳过、不断流)。
 - **首连同步失败即 `Err`**(fail-fast)—— 包括权限类 error 帧;之后断线由 supervisor 在后台自愈,调用方无感,但**永久性错误不再重试**。
 - **断线期间的 subscribe / unsubscribe 只更新期望状态**,重连成功后自动重放(股票流:auth + 全量 subscribe;新闻流:subscribe 当前符号集)。
 - `Clone` 共享同一连接;**最后一个句柄 drop 等价于 `close()`**。`death_token` / `clone_handle`(旧 API)已移除,由 `status()` 与 `Clone` 取代。
 - 订阅重放前收到的订阅动作会进入期望状态,不会丢失。
 - 消息以 JSON 数组到达,解码为 `T` 标签强类型枚举;未知消息跳过并告警,不会杀死流。
+- **解析性能**:股票流消息循环走 tape 快路径(`simd_json::to_tape` 拿扁平 token 序列,`q`/`t` 顺序扫字段手工构建、零 DOM 分配),其余低频类型经 serde 兜底;`tape_parity` 对拍测试保证 tape 与 serde 两条路径逐字段一致。新闻流消息量低,直接走 serde 路径。
 - tungstenite 依赖 WS 协议层,SDK 另在应用层显式回应服务端 ping。
 
 ## 常量
@@ -150,6 +154,8 @@ while let Ok(msg) = rx.recv().await {
 
 ```bash
 cargo test -p alpaca_stream   # 单测(退避曲线 / 订阅合并 / 消息解码)
-                              # + 本机 WS 集成测试(断线→重连→重放→关闭,无需外网)
+                              # + tape_parity 对拍(tape 快路径与 serde 路径逐字段一致)
+                              # + 本机 WS 集成测试(断线→重连→重放→关闭,
+                              #   及 unsubscribe 后重连不复活已退订 symbol;无需外网)
 cargo run -p test -- alpaca:stock_stream   # 联网冒烟(需密钥)
 ```

@@ -5,7 +5,8 @@
 //! `HTTP-Latest-Bars.md`, `HTTP-Latest bar (single symbol).md`).
 //!
 //! All endpoints are methods on [`Client`]: `bars` (multi page),
-//! `bars_all` (auto-pagination), `bars_single` / `bars_single_all`
+//! `bars_all` (auto-pagination, with the `bars_all_with_progress`
+//! per-page progress variant), `bars_single` / `bars_single_all`
 //! (single-symbol), `latest_bars` / `latest_bar`.
 
 use std::collections::HashMap;
@@ -249,15 +250,28 @@ where
     /// Fetch bars for every symbol, following `next_page_token` until
     /// exhausted.
     pub async fn bars_all(&self, params: &Params) -> anyhow::Result<HashMap<String, Vec<Bar>>> {
+        self.bars_all_with_progress(params, |_| {}).await
+    }
+
+    /// [`bars_all`](Self::bars_all) 的带进度版本:每拉完一页,回调累计已拉取的 bar 条数
+    /// (relay 用它给客户端报翻页进度)。
+    pub async fn bars_all_with_progress(
+        &self,
+        params: &Params,
+        mut on_page: impl FnMut(usize),
+    ) -> anyhow::Result<HashMap<String, Vec<Bar>>> {
         let mut all: HashMap<String, Vec<Bar>> = HashMap::new();
         let mut page_token = None;
         loop {
             let mut p = params.clone();
             p.page_token.clone_from(&page_token);
             let page = self.bars(&p).await?;
+            let mut fetched = all.values().map(Vec::len).sum::<usize>();
             for (symbol, bars) in page.bars {
+                fetched += bars.len();
                 all.entry(symbol).or_default().extend(bars);
             }
+            on_page(fetched);
             match page.next_page_token {
                 Some(token) => page_token = Some(token),
                 None => return Ok(all),
@@ -313,6 +327,12 @@ where
 mod tests {
     use super::*;
 
+    /// simd-json 等价解析:样本字符串 → 类型化结构体。
+    fn parse_raw<T: serde::de::DeserializeOwned>(raw: &str) -> T {
+        let mut bytes = raw.as_bytes().to_vec();
+        simd_json::from_slice(&mut bytes).unwrap()
+    }
+
     #[test]
     fn page_deserializes() {
         let raw = r#"{
@@ -325,7 +345,7 @@ mod tests {
             "next_page_token": "APAPLAA*AMDMAA==",
             "currency": "USD"
         }"#;
-        let page: BarsPage = serde_json::from_str(raw).unwrap();
+        let page: BarsPage = parse_raw(raw);
         let bar = &page.bars["AAPL"][0];
         assert_eq!(bar.open, 178.26);
         assert_eq!(bar.close, 178.08);
@@ -341,8 +361,61 @@ mod tests {
                     "l": 177.76, "c": 178.08, "v": 60937, "n": 1727, "vw": 177.954244},
             "currency": "USD"
         }"#;
-        let latest: LatestBar = serde_json::from_str(raw).unwrap();
+        let latest: LatestBar = parse_raw(raw);
         assert_eq!(latest.symbol, "AAPL");
         assert_eq!(latest.bar.high, 178.34);
+    }
+
+    /// 翻页进度:mock 执行器按序吐两页,进度回调应报「每页拉完后的累计条数」。
+    #[test]
+    fn bars_all_with_progress_reports_cumulative_counts() {
+        use std::sync::{Arc, Mutex};
+
+        use utils::HttpResponse;
+
+        struct MockExecutor;
+
+        /// 依次返回预置页的假服务端(作为"HTTP 客户端"类型注入)。
+        struct PageServer {
+            pages: Mutex<Vec<&'static str>>,
+        }
+
+        impl HttpExecutor<Arc<PageServer>> for MockExecutor {
+            #[allow(clippy::unused_async)]
+            async fn execute(
+                &self,
+                client: &Arc<PageServer>,
+                _request: &utils::Method,
+            ) -> anyhow::Result<HttpResponse> {
+                let page = client.pages.lock().unwrap().remove(0);
+                Ok(HttpResponse {
+                    status: 200,
+                    body: page.as_bytes().to_vec(),
+                })
+            }
+        }
+
+        let server = Arc::new(PageServer {
+            pages: Mutex::new(vec![
+                r#"{"bars":{"AAPL":[{"t":"2022-01-03T09:00:00Z","o":178.26,"h":178.34,"l":177.76,"c":178.08,"v":60937,"n":1727,"vw":177.95}]},"next_page_token":"P2"}"#,
+                r#"{"bars":{"AAPL":[{"t":"2022-01-04T09:00:00Z","o":178.0,"h":178.1,"l":177.9,"c":178.05,"v":100,"n":2,"vw":178.0}],"MSFT":[{"t":"2022-01-04T09:00:00Z","o":335.0,"h":335.2,"l":334.8,"c":335.1,"v":50,"n":1,"vw":335.0}]}}"#,
+            ]),
+        });
+        let client = Client::new(server, "key", "secret", MockExecutor);
+
+        let progress = Mutex::new(Vec::new());
+        let all = futures::executor::block_on(client.bars_all_with_progress(
+            &Params {
+                symbols: vec!["AAPL".into(), "MSFT".into()],
+                timeframe: timeframe::DAY_1.into(),
+                ..Default::default()
+            },
+            |fetched| progress.lock().unwrap().push(fetched),
+        ))
+        .unwrap();
+
+        assert_eq!(progress.into_inner().unwrap(), [1, 3]);
+        assert_eq!(all["AAPL"].len(), 2);
+        assert_eq!(all["MSFT"].len(), 1);
     }
 }

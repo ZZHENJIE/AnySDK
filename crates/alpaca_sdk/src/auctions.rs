@@ -226,6 +226,12 @@ where
 mod tests {
     use super::*;
 
+    /// simd-json 等价解析:样本字符串 → 类型化结构体。
+    fn parse_raw<T: serde::de::DeserializeOwned>(raw: &str) -> T {
+        let mut bytes = raw.as_bytes().to_vec();
+        simd_json::from_slice(&mut bytes).unwrap()
+    }
+
     #[test]
     fn page_deserializes() {
         let raw = r#"{
@@ -245,7 +251,7 @@ mod tests {
             "next_page_token": null,
             "currency": "USD"
         }"#;
-        let page: AuctionsPage = serde_json::from_str(raw).unwrap();
+        let page: AuctionsPage = parse_raw(raw);
         let day = &page.auctions["AAPL"][0];
         assert_eq!(day.date, "2022-10-12");
         assert_eq!(day.close[0].price, 138.36);

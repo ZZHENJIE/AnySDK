@@ -167,8 +167,16 @@ pub fn build_url(base: &str, path: &str, query: &[(&str, String)]) -> String {
 }
 
 /// 把响应体字节按 JSON 解析为 `T`(各 SDK 的 `send_json` 落点)。
+///
+/// simd-json 会原地改写 buffer(SIMD 对齐 + 字符串 unescape),因此内部先拷贝;
+/// 持有 `Vec<u8>` 的调用方请用零拷贝的 [`parse_json_owned`]。
 pub fn parse_json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> anyhow::Result<T> {
-    Ok(serde_json::from_slice(bytes)?)
+    parse_json_owned(bytes.to_vec())
+}
+
+/// [`parse_json`] 的零拷贝版本:直接消费响应体字节。
+pub fn parse_json_owned<T: serde::de::DeserializeOwned>(mut bytes: Vec<u8>) -> anyhow::Result<T> {
+    Ok(simd_json::from_slice(&mut bytes)?)
 }
 
 /// Append `key: value` to a query builder when the option is set.

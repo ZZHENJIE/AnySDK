@@ -307,6 +307,126 @@ async fn run_alpaca_news_stream() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---------- WS 链路延迟测量 ----------
+
+/// 滚动延迟统计:min / avg / max,单位毫秒。
+#[derive(Default)]
+struct LagStats {
+    count: u64,
+    sum_ms: f64,
+    min_ms: f64,
+    max_ms: f64,
+    /// 超过 1s 的尖峰次数(链路卡顿的直观信号)。
+    spikes: u64,
+}
+
+impl LagStats {
+    fn record(&mut self, lag_ms: f64) {
+        self.count += 1;
+        self.sum_ms += lag_ms;
+        self.min_ms = if self.count == 1 { lag_ms } else { self.min_ms.min(lag_ms) };
+        self.max_ms = self.max_ms.max(lag_ms);
+        if lag_ms > 1000.0 {
+            self.spikes += 1;
+            println!(
+                "[{}] [spike] lag {:.0} ms (>1s)",
+                local_now(),
+                lag_ms
+            );
+        }
+    }
+
+    fn summary(&self) -> String {
+        if self.count == 0 {
+            return "no messages".into();
+        }
+        format!(
+            "n={} avg={:.0}ms min={:.0}ms max={:.0}ms spikes>1s={}",
+            self.count,
+            self.sum_ms / self.count as f64,
+            self.min_ms,
+            self.max_ms,
+            self.spikes
+        )
+    }
+}
+
+/// 行情 WS 链路端到端延迟测量:订阅 SPY quotes,逐条计算
+/// `本地接收时刻 − 交易所时间戳`,每 5 秒打印滚动统计,Ctrl+C 退出。
+///
+/// 路由 A/B 对比:
+/// - 设置环境变量 `LAG_PROXY=socks5://host:port` → 经 SOCKS5 代理;
+/// - 不设置 → 直连。
+/// `LAG_SECS`(默认 60)控制运行时长,到时打印总结后退出。
+async fn run_alpaca_lag_test() -> anyhow::Result<()> {
+    let secs: u64 = std::env::var("LAG_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
+    let proxy = std::env::var("LAG_PROXY").ok();
+    let route = match &proxy {
+        Some(p) => format!("proxy {p}"),
+        None => "direct".to_string(),
+    };
+
+    let stream = alpaca_stream::StockStream::connect_with_url_and_proxy(
+        alpaca_stream::STOCK_STREAM_URL,
+        Feed::Sip,
+        alpaca_api_key()?,
+        alpaca_api_secret()?,
+        proxy,
+    )
+    .await?;
+    println!("[{}] connected via {route}", local_now());
+
+    let mut status_rx = stream.status();
+    tokio::spawn(async move {
+        while let Ok(event) = status_rx.recv().await {
+            println!("[{}] [status] {event:?}", local_now());
+        }
+    });
+
+    stream
+        .subscribe(&alpaca_stream::StockSubscription {
+            quotes: vec!["SPY".into()],
+            ..Default::default()
+        })
+        .await?;
+
+    let mut stats = LagStats::default();
+    let mut receiver = stream.messages();
+    let mut report = tokio::time::interval(Duration::from_secs(5));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => {
+                println!("[{}] === {secs}s summary ({route}): {} ===", local_now(), stats.summary());
+                stream.close();
+                return Ok(());
+            }
+            _ = report.tick() => {
+                println!("[{}] rolling: {}", local_now(), stats.summary());
+            }
+            message = receiver.recv() => match message {
+                Ok(alpaca_stream::StockMessage::Quote(q)) => {
+                    let lag_ms = (chrono::Utc::now() - q.time).num_milliseconds() as f64;
+                    // 负值 = 本机时钟快于交易所钟(NTP 误差),按 0 计。
+                    stats.record(lag_ms.max(0.0));
+                }
+                Ok(alpaca_stream::StockMessage::Subscription(_)) => {}
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    println!("[{}] [warn] receiver lagged, dropped {n}", local_now());
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    anyhow::bail!("stream closed")
+                }
+            },
+        }
+    }
+}
+
 // ---------- Finviz 端点 ----------
 
 async fn run_finviz_screener() -> anyhow::Result<()> {
@@ -467,6 +587,10 @@ fn registry() -> BTreeMap<&'static str, Runner> {
         (
             "alpaca:stock_stream",
             (|| Box::pin(run_alpaca_stock_stream()) as _) as Runner,
+        ),
+        (
+            "alpaca:lag_test",
+            (|| Box::pin(run_alpaca_lag_test()) as _) as Runner,
         ),
         (
             "alpaca:news_stream",

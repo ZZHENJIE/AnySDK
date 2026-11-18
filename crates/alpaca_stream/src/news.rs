@@ -1,6 +1,6 @@
 //! 新闻实时流(spec: Alpaca `WebSocket-News.md`)。
 //!
-//! 认证通过 WS 升级请求头完成;连接建立后由 [`supervisor`](crate::supervisor)
+//! 认证通过 WS 升级请求头完成;连接建立后由 `supervisor`
 //! 监督:断线自动重连(指数退避),重连后自动重放订阅。
 
 use std::sync::{Arc, Mutex};
@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Context as _;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use simd_json::prelude::*;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -73,7 +74,7 @@ struct NewsProtocol {
 }
 
 fn action_json(action: &str, symbols: &[String]) -> String {
-    serde_json::json!({ "action": action, "news": symbols }).to_string()
+    simd_json::json!({ "action": action, "news": symbols.to_vec() }).encode()
 }
 
 impl Protocol for NewsProtocol {
@@ -128,6 +129,11 @@ impl Protocol for NewsProtocol {
         };
         vec![action_json(wire_action, symbols)]
     }
+
+    /// 新闻流消息量低:直接走 serde 兜底路径。
+    fn parse_frame(buf: &mut [u8]) -> Vec<NewsMessage> {
+        crate::hotpath::parse_frame_serde(buf)
+    }
 }
 
 // ---------- handle ----------
@@ -158,7 +164,7 @@ impl NewsStream {
         Self::connect_to(NEWS_STREAM_URL, key_id, secret).await
     }
 
-    /// [`connect`] 的自定义端点版本(自建代理 / 沙箱 / 测试服务)。
+    /// [`connect`](Self::connect) 的自定义端点版本(自建代理 / 沙箱 / 测试服务)。
     pub async fn connect_to(
         url: &str,
         key_id: impl Into<String>,
@@ -167,7 +173,7 @@ impl NewsStream {
         Self::connect_to_with_proxy(url, key_id, secret, None).await
     }
 
-    /// [`connect_to`] 的代理版本。`proxy` 为 `socks5://host:port`
+    /// [`connect_to`](Self::connect_to) 的代理版本。`proxy` 为 `socks5://host:port`
     /// (SOCKS5,无认证;域名解析发生在代理端);`None` = 直连。显式传入时
     /// 优先于 `ALL_PROXY` / `all_proxy` 环境变量(后者仅在 socks5 scheme 时生效)。
     pub async fn connect_to_with_proxy(
@@ -252,7 +258,8 @@ impl NewsStream {
         self.inner.messages.subscribe()
     }
 
-    /// 连接状态事件([`StreamStatus`]:Connected / Reconnecting / Closed)。
+    /// 连接状态事件([`StreamStatus`]:Connected / Reconnecting /
+    /// Failed{reason,message} / Closed)。
     pub fn status(&self) -> broadcast::Receiver<StreamStatus> {
         self.inner.status.subscribe()
     }
@@ -276,15 +283,21 @@ impl Drop for NewsStream {
 mod tests {
     use super::*;
 
+    /// simd-json 等价解析:wire 帧字符串 → DOM 值。
+    fn parse_dom(text: &str) -> simd_json::OwnedValue {
+        let mut bytes = text.as_bytes().to_vec();
+        simd_json::to_owned_value(&mut bytes).unwrap()
+    }
+
     #[test]
     fn apply_unions_symbols_and_replays_desired_state() {
         let mut desired: NewsDesired = Vec::new();
         let frames = NewsProtocol::apply(&mut desired, &NewsAction::Subscribe(vec!["AAPL".into(), "MSFT".into()]));
         assert_eq!(desired, ["AAPL", "MSFT"]);
         assert_eq!(frames.len(), 1);
-        let json: serde_json::Value = serde_json::from_str(&frames[0]).unwrap();
-        assert_eq!(json["action"], "subscribe");
-        assert_eq!(json["news"], serde_json::json!(["AAPL", "MSFT"]));
+        let json = parse_dom(&frames[0]);
+        assert_eq!(json.get("action").and_then(|v| v.as_str()), Some("subscribe"));
+        assert_eq!(json.get("news"), Some(&simd_json::json!(["AAPL", "MSFT"])));
 
         // 重复订阅不产生重复符号。
         NewsProtocol::apply(&mut desired, &NewsAction::Subscribe(vec!["AAPL".into(), "TSLA".into()]));
@@ -302,14 +315,14 @@ mod tests {
         NewsProtocol::apply(&mut desired, &NewsAction::Subscribe(vec!["*".into()]));
         let replay = NewsProtocol::replay(&desired);
         assert_eq!(replay.len(), 1);
-        let json: serde_json::Value = serde_json::from_str(&replay[0]).unwrap();
-        assert_eq!(json["news"], serde_json::json!(["*"]));
+        let json = parse_dom(&replay[0]);
+        assert_eq!(json.get("news"), Some(&simd_json::json!(["*"])));
     }
 
     /// News articles decode with their wire field names.
     #[test]
     fn news_message_deserializes() {
-        let msg: NewsMessage = serde_json::from_value(serde_json::json!({
+        let mut bytes = br#"{
             "T": "n",
             "id": 24843171,
             "headline": "Apple Leader in Phone Sales",
@@ -321,8 +334,9 @@ mod tests {
             "url": null,
             "symbols": ["AAPL"],
             "source": "benzinga"
-        }))
-        .unwrap();
+        }"#
+        .to_vec();
+        let msg: NewsMessage = simd_json::from_slice(&mut bytes).unwrap();
         let NewsMessage::News(article) = msg else {
             panic!("expected news, got {msg:?}");
         };

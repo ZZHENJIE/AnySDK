@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use futures::StreamExt as _;
+use simd_json::prelude::*;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::handshake::client::Request;
@@ -185,8 +186,12 @@ pub(crate) async fn wait_control(read: &mut WsReader, want: &str) -> anyhow::Res
             .await
             .ok_or_else(|| anyhow::anyhow!("stream closed during handshake"))??;
         let Message::Text(text) = frame else { continue };
-        let array: Vec<serde_json::Value> = serde_json::from_str(text.as_str())
+        let mut bytes = text.as_bytes().to_vec();
+        let value = simd_json::to_owned_value(&mut bytes)
             .with_context(|| format!("handshake frame: {}", text.as_str()))?;
+        let Some(array) = value.as_array() else {
+            anyhow::bail!("handshake frame: {}", text.as_str());
+        };
         for value in array {
             match value.get("T").and_then(|t| t.as_str()) {
                 Some("success") => {

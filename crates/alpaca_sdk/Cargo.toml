@@ -11,5 +11,9 @@ unsafe_code = "deny"
 utils.workspace = true
 anyhow.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+simd-json.workspace = true
 chrono.workspace = true
+
+[dev-dependencies]
+# 测试用 futures::executor::block_on 驱动 mock 翻页;不进入对外依赖。
+futures.workspace = true

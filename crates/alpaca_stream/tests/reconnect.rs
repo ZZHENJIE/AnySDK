@@ -13,7 +13,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{broadcast, watch};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
-use alpaca_stream::{NewsStream, StreamStatus};
+use alpaca_stream::{Feed, NewsStream, StatusReason, StockStream, StockSubscription, StreamStatus};
 
 /// 极简新闻流服务端:
 /// - `error_mode` 为真:发 error 帧后断开(模拟认证失败 / 无 feed 权限);
@@ -97,6 +97,48 @@ async fn wait_until(
     }
 }
 
+/// 极简股票流服务端:发 success(authenticated) 后持续记录客户端每一帧
+/// (auth / subscribe / unsubscribe / 重连后的重放),直到 kill 置真或对端断开;
+/// 外层持续 accept,客户端重连即"重启"。
+async fn spawn_stock_server(listener: TcpListener, seen: Arc<Mutex<Vec<String>>>, kill: watch::Receiver<bool>) {
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => return,
+            };
+            let seen = seen.clone();
+            let mut kill = kill.clone();
+            tokio::spawn(async move {
+                if *kill.borrow() {
+                    return; // 宕机窗口内的连接:直接掐断
+                }
+                let Ok(ws) = accept_async(stream).await else { return };
+                let (mut write, mut read) = ws.split();
+                if write
+                    .send(Message::text(r#"[{"T":"success","msg":"authenticated"}]"#))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                loop {
+                    tokio::select! {
+                        _ = kill.changed() => { if *kill.borrow() { return; } }
+                        frame = read.next() => {
+                            match frame {
+                                Some(Ok(Message::Text(text))) => seen.lock().unwrap().push(text.to_string()),
+                                Some(_) => {}
+                                None => return,
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    });
+}
+
 async fn wait_status(
     status: &mut broadcast::Receiver<StreamStatus>,
     cond: impl Fn(&StreamStatus) -> bool,
@@ -132,7 +174,7 @@ async fn reconnects_and_replays_subscription() {
     let mut status = stream.status();
     stream.subscribe(&["AAPL"]).await.unwrap();
 
-    wait_until(&seen, |seen| seen.len() >= 1, "first subscribe").await;
+    wait_until(&seen, |seen| !seen.is_empty(), "first subscribe").await;
     assert_eq!(
         seen.lock().unwrap()[0],
         r#"{"action":"subscribe","news":["AAPL"]}"#
@@ -200,7 +242,7 @@ async fn fatal_handshake_error_stops_reconnect() {
         .unwrap();
     let mut status = stream.status();
     stream.subscribe(&["AAPL"]).await.unwrap();
-    wait_until(&seen, |seen| seen.len() >= 1, "first subscribe").await;
+    wait_until(&seen, |seen| !seen.is_empty(), "first subscribe").await;
 
     // 服务端断开,且重启后进入"无权限"状态 → 重连握手会收到 error 帧。
     kill_tx.send(true).unwrap();
@@ -210,11 +252,14 @@ async fn fatal_handshake_error_stops_reconnect() {
     }, "Reconnecting once")
     .await;
 
-    // 永久性错误 → Failed 事件,supervisor 退出,不再无限重试。
+    // 永久性错误 → Failed 事件(AuthFailed:重试无意义),supervisor 退出,不再无限重试。
     wait_status(&mut status, |s| {
         matches!(
             s,
-            StreamStatus::Failed { message } if message.contains("insufficient subscription")
+            StreamStatus::Failed {
+                reason: StatusReason::AuthFailed,
+                message,
+            } if message.contains("insufficient subscription")
         )
     }, "Failed with the handshake error")
     .await;
@@ -227,4 +272,81 @@ async fn fatal_handshake_error_stops_reconnect() {
     stream.close();
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(seen.lock().unwrap().len(), 1, "still no reconnect after close");
+}
+
+/// 股票流 unsubscribe 与重连重放的一致性:退订从期望状态表移除后,
+/// 重连重放的 subscribe 帧不得包含已退订 symbol,更不能重放 unsubscribe。
+/// (relay 的引用计数正确性依赖这一点。)
+#[tokio::test]
+async fn stock_unsubscribe_not_replayed_after_reconnect() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let (kill_tx, kill_rx) = watch::channel(false);
+    spawn_stock_server(listener, seen.clone(), kill_rx).await;
+
+    // 首连 + 订阅 {AAPL, MSFT}。服务端记录:[0]=auth, [1]=subscribe。
+    let stream = StockStream::connect_with_url(&format!("ws://{addr}"), Feed::Iex, "key", "secret")
+        .await
+        .unwrap();
+    let mut status = stream.status();
+    stream
+        .subscribe(&StockSubscription {
+            trades: vec!["AAPL".into(), "MSFT".into()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    wait_until(&seen, |seen| seen.len() >= 2, "auth + subscribe").await;
+    assert_eq!(seen.lock().unwrap()[1], r#"{"action":"subscribe","trades":["AAPL","MSFT"]}"#);
+
+    // 退订 AAPL → 服务端收到 unsubscribe 帧。
+    stream
+        .unsubscribe(&StockSubscription {
+            trades: vec!["AAPL".into()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    wait_until(&seen, |seen| seen.len() >= 3, "unsubscribe frame").await;
+    assert_eq!(seen.lock().unwrap()[2], r#"{"action":"unsubscribe","trades":["AAPL"]}"#);
+
+    // 服务端断开 → 重连;重放必须反映退订后的期望状态:
+    // [3]=重新 auth, [4]=subscribe 只含 MSFT(没有 AAPL,也没有 unsubscribe 帧)。
+    kill_tx.send(true).unwrap();
+    wait_status(
+        &mut status,
+        |s| matches!(s, StreamStatus::Reconnecting { attempt: 1, .. }),
+        "Reconnecting once",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    kill_tx.send(false).unwrap();
+    wait_until(&seen, |seen| seen.len() >= 5, "replayed subscribe after reconnect").await;
+    assert_eq!(
+        seen.lock().unwrap()[3],
+        r#"{"action":"auth","key":"key","secret":"secret"}"#,
+        "reconnect re-authenticates first"
+    );
+    assert_eq!(
+        seen.lock().unwrap()[4],
+        r#"{"action":"subscribe","trades":["MSFT"]}"#,
+        "replay must not resurrect the unsubscribed symbol"
+    );
+    assert!(
+        seen.lock().unwrap()[3..]
+            .iter()
+            .all(|frame| !frame.contains("unsubscribe")),
+        "no unsubscribe frame may be replayed: {:?}",
+        &seen.lock().unwrap()[3..]
+    );
+    wait_status(
+        &mut status,
+        |s| matches!(s, StreamStatus::Connected),
+        "Connected after reconnect",
+    )
+    .await;
+
+    stream.close();
+    wait_status(&mut status, |s| matches!(s, StreamStatus::Closed), "Closed").await;
 }

@@ -6,9 +6,9 @@
 
 ## 特性
 
-- **不绑定任何 HTTP 客户端**:SDK 只把请求描述为 `utils::Method`(URL + headers),由你为自己的客户端(`reqwest` / 自研 / GUI 内嵌 client 等)实现一次 `HttpExecutor` 即可驱动全部端点。
-- **只解析,不转换**:SDK 仅把 JSON / CSV 反序列化为类型化结构体;时间等字段保持数据源的原始值,不做时区换算、默认值填充或任何语义转换。
-- **自愈式实时流**:`alpaca_stream` 提供股票 / 新闻 WebSocket 流 —— 断线自动重连(指数退避)、主动 ping + 静默检测保活、订阅自动重放、独立连接状态通道。
+- **不绑定任何 HTTP 客户端**:SDK 只把请求描述为 `utils::Method`(URL + headers),由你为自己的客户端(`reqwest` / 自研 / GUI 内嵌 client 等)实现一次 `HttpExecutor` 即可驱动全部端点;超时 / 重试 / 代理等传输策略同样归你自己的客户端配置。
+- **只解析,不转换**:SDK 仅把 JSON / CSV 反序列化为类型化结构体;时间等字段保持数据源的原始值,不做时区换算、默认值填充或任何语义转换。JSON 层为 simd-json(REST 低频路径走 serde,流热路径走 tape 快解析,见下)。
+- **自愈式实时流**:`alpaca_stream` 提供股票 / 新闻 WebSocket 流 —— 断线自动重连(指数退避)、主动 ping + 静默检测保活、订阅自动重放、独立连接状态通道;股票流消息循环用 tape 快路径解析(`q`/`t` 零 DOM 构建),对拍测试保证与 serde 路径逐字段一致。
 - **类型安全 / 异步 / 零 unsafe**:全部 crate `deny(unsafe_code)`,`edition 2024`。
 
 ## 工作区结构
@@ -108,8 +108,12 @@ use anysdk::alpaca_sdk::{bars, quotes, snapshots, news, Feed};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // 本 SDK 不绑定 HTTP 客户端:超时、重试、代理等传输策略都由使用方在自己的
+    // reqwest::Client 上配置(如 .timeout(Duration::from_secs(10))),再交给执行器。
     let mut client = anysdk::alpaca_sdk::Client::new(
-        reqwest::Client::new(),
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()?,
         "YOUR_API_KEY",
         "YOUR_API_SECRET",
         ReqwestExecutor,
@@ -139,10 +143,17 @@ async fn main() -> anyhow::Result<()> {
 
     // 实时流(WS):自愈式长连接 —— 断线自动重连 + 订阅自动重放 + 保活
     let stream = anysdk::alpaca_stream::StockStream::connect(Feed::Iex, "KEY", "SECRET").await?;
-    // 连接状态事件(Connected / Reconnecting{attempt,delay} / Failed / Closed)
+    // 连接状态事件(Connected / Reconnecting{attempt,delay} /
+    // Failed{reason: AuthFailed|Network|Protocol, message} / Closed;
+    // AuthFailed 时 SDK 已停止重连,上层不应再重试)
     let mut status = stream.status();
     tokio::spawn(async move { while let Ok(ev) = status.recv().await { println!("{ev:?}"); } });
     stream.subscribe(&anysdk::alpaca_stream::StockSubscription {
+        trades: vec!["AAPL".into()],
+        ..Default::default()
+    }).await?;
+    // 退订:socket 保持打开;断线期间退订同样记入期望状态,重连后不会复活
+    stream.unsubscribe(&anysdk::alpaca_stream::StockSubscription {
         trades: vec!["AAPL".into()],
         ..Default::default()
     }).await?;

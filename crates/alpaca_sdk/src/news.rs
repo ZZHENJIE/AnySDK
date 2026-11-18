@@ -138,6 +138,12 @@ where
 mod tests {
     use super::*;
 
+    /// simd-json 等价解析:样本字符串 → 类型化结构体。
+    fn parse_raw<T: serde::de::DeserializeOwned>(raw: &str) -> T {
+        let mut bytes = raw.as_bytes().to_vec();
+        simd_json::from_slice(&mut bytes).unwrap()
+    }
+
     #[test]
     fn page_deserializes() {
         let raw = r#"{
@@ -160,7 +166,7 @@ mod tests {
             ],
             "next_page_token": "MTY0MDk0ODkyMzAwMDAwMDAwMHwyNDg0MzE3MQ=="
         }"#;
-        let page: NewsPage = serde_json::from_str(raw).unwrap();
+        let page: NewsPage = parse_raw(raw);
         assert_eq!(page.news.len(), 1);
         let article = &page.news[0];
         assert_eq!(article.id, 24843171);
@@ -195,7 +201,7 @@ mod tests {
             ],
             "next_page_token": null
         }"#;
-        let page: NewsPage = serde_json::from_str(raw).unwrap();
+        let page: NewsPage = parse_raw(raw);
         let article = &page.news[0];
         assert!(article.url.is_none());
         assert!(article.images.is_empty());

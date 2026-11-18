@@ -170,7 +170,7 @@ where
     pub(crate) async fn send_json<R: DeserializeOwned>(&self, request: Method) -> anyhow::Result<R> {
         let response = self.inner.send(request).await?;
         let bytes = utils::ensure_success(response)?;
-        utils::parse_json(&bytes)
+        utils::parse_json_owned(bytes)
     }
 }
 

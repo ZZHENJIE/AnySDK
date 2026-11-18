@@ -19,7 +19,11 @@
 //!
 //! - **首连同步失败即 `Err`**(fail-fast);之后断线由 supervisor 在后台自愈。
 //! - **断线期间的 subscribe/unsubscribe 只更新期望状态**,重连后自动重放。
-//! - [`StreamStatus::Reconnecting`] 携带第几次重试与本次退避时长,GUI 可展示。
+//! - [`StreamStatus::Reconnecting`] 携带第几次重试与本次退避时长,GUI 可展示;
+//!   [`StreamStatus::Failed`] 携带 `StatusReason`(认证类永久错误为
+//!   `AuthFailed`,supervisor 已停止重连)与原始 message。
+//! - 股票流帧解析走 tape 快路径(`q`/`t` 零 DOM 构建)+ serde 兜底,
+//!   详见 `hotpath` 模块;对拍测试(`tests/tape_parity.rs`)保证两路一致。
 //! - [`StockStream`] / [`NewsStream`] 的 `Clone` 共享同一连接;最后一个句柄
 //!   drop 等价于 [`close`](StockStream::close)。
 //! - **SOCKS5 代理可选**:显式入口(`connect_with_url_and_proxy` /
@@ -33,9 +37,16 @@ mod status;
 mod supervisor;
 mod ws;
 
+/// 流消息解析路径(tape 快路径 + serde 兜底)。
+///
+/// #[doc(hidden)]:仅 supervisor 与对拍测试(`tests/tape_parity.rs`)使用,
+/// 不构成公开 API 承诺。
+#[doc(hidden)]
+pub mod hotpath;
+
 pub use alpaca_sdk::Feed;
 pub use news::{NewsMessage, NewsStream};
-pub use status::StreamStatus;
+pub use status::{StatusReason, StreamStatus};
 pub use stocks::{StockMessage, StockStream, StockSubscription};
 pub use ws::{CONNECT_TIMEOUT, PING_INTERVAL, STALE_AFTER};
 

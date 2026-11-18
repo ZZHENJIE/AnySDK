@@ -117,6 +117,12 @@ where
 mod tests {
     use super::*;
 
+    /// simd-json 等价解析:样本字符串 → 类型化结构体。
+    fn parse_raw<T: serde::de::DeserializeOwned>(raw: &str) -> T {
+        let mut bytes = raw.as_bytes().to_vec();
+        simd_json::from_slice(&mut bytes).unwrap()
+    }
+
     #[test]
     fn snapshot_deserializes_camel_case() {
         let raw = r#"{
@@ -131,7 +137,7 @@ mod tests {
             "prevDailyBar": {"t": "2022-01-03T05:00:00Z", "o": 177.77, "h": 182.88,
                              "l": 177.26, "c": 182.19, "v": 160418504, "n": 449385, "vw": 181.517}
         }"#;
-        let snapshot: Snapshot = serde_json::from_str(raw).unwrap();
+        let snapshot: Snapshot = parse_raw(raw);
         assert_eq!(snapshot.latest_quote.unwrap().ask_price, 182.13);
         assert_eq!(snapshot.latest_trade.unwrap().price, 182.1);
         assert_eq!(snapshot.minute_bar.unwrap().volume, 1372);
@@ -145,7 +151,7 @@ mod tests {
             "latestTrade": {"t": "2022-01-04T15:19:00.1024Z", "x": "D", "p": 182.1,
                             "s": 225, "i": 6913, "c": ["@"], "z": "C"}
         }"#;
-        let single: SingleSnapshot = serde_json::from_str(raw).unwrap();
+        let single: SingleSnapshot = parse_raw(raw);
         assert_eq!(single.symbol, "AAPL");
         assert!(single.snapshot.prev_daily_bar.is_none());
         assert_eq!(single.snapshot.latest_trade.unwrap().price, 182.1);

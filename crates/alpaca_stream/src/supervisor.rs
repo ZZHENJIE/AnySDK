@@ -21,7 +21,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use crate::status::StreamStatus;
+use crate::status::{StatusReason, StreamStatus};
 use crate::ws::{self, Fatal, WsReader, WsWriter};
 
 /// 重连退避:首次 1s,指数翻倍,封顶 [`BACKOFF_MAX`]。
@@ -70,6 +70,10 @@ pub(crate) trait Protocol: Send + Sync + 'static {
     /// 把一个动作合并进期望状态;返回需要**立即**下发的 JSON 帧
     /// (断线期间返回值会被丢弃,靠重放恢复)。
     fn apply(desired: &mut Self::Desired, action: &Self::Action) -> Vec<String>;
+
+    /// 把一帧原始字节解析为消息列表(单条失败只跳过自己)。
+    /// 股票流走 [`crate::hotpath`] 的 tape 快路径,新闻流走 serde 兜底路径。
+    fn parse_frame(buf: &mut [u8]) -> Vec<Self::Message>;
 }
 
 /// 重连退避曲线:`BACKOFF_INITIAL << (attempt-1)`,封顶 `BACKOFF_MAX`(秒)。
@@ -79,6 +83,12 @@ fn backoff_delay(attempt: u32) -> Duration {
         .unwrap_or(BACKOFF_MAX)
         .clamp(BACKOFF_INITIAL, BACKOFF_MAX);
     Duration::from_secs(secs)
+}
+
+/// Mutex 毒化兜底:持锁线程 panic 后恢复数据而不是连锁 panic
+/// (自愈式流的监督循环、订阅状态表、心跳计时都不允许被毒化杀死)。
+fn lock_ok<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// 单次连接尝试(TCP/TLS/升级 + 握手)整体受 [`ws::CONNECT_TIMEOUT`] 约束。
@@ -132,7 +142,7 @@ pub(crate) async fn run<P: Protocol>(
                         biased;
                         _ = close.cancelled() => { cancelled = true; break; }
                         Some(action) = actions.recv() => {
-                            let _ = P::apply(&mut desired.lock().unwrap(), &action);
+                            let _ = P::apply(&mut lock_ok(&desired), &action);
                         }
                         _ = tokio::time::sleep_until(deadline) => break,
                     }
@@ -166,6 +176,7 @@ pub(crate) async fn run<P: Protocol>(
                     // 永久性错误(认证 / 权限 / 连接数限制):重连不可能成功。
                     warn!("stream fatal error, giving up: {}", fatal.0);
                     let _ = status.send(StreamStatus::Failed {
+                        reason: StatusReason::AuthFailed,
                         message: fatal.0.clone(),
                     });
                     return;
@@ -199,10 +210,11 @@ async fn run_session<P: Protocol>(
         messages.clone(),
         last_seen.clone(),
         conn_alive.clone(),
+        P::parse_frame,
     ));
 
     // 重放期望订阅(断线期间的变更已合入 desired)。
-    let replay_frames = P::replay(&desired.lock().unwrap());
+    let replay_frames = P::replay(&lock_ok(desired));
     for frame in replay_frames {
         let _ = frame_tx.send(FrameAction::Send(frame)).await;
     }
@@ -217,13 +229,13 @@ async fn run_session<P: Protocol>(
             _ = close.cancelled() => break,
             _ = conn_alive.cancelled() => break,
             Some(action) = actions.recv() => {
-                let frames = P::apply(&mut desired.lock().unwrap(), &action);
+                let frames = P::apply(&mut lock_ok(desired), &action);
                 for frame in frames {
                     let _ = frame_tx.send(FrameAction::Send(frame)).await;
                 }
             }
             _ = watchdog.tick() => {
-                let silent_for = last_seen.lock().unwrap().elapsed();
+                let silent_for = lock_ok(&last_seen).elapsed();
                 if silent_for > ws::STALE_AFTER {
                     warn!("stream silent for {silent_for:?}; forcing reconnect");
                     break;
@@ -281,12 +293,18 @@ async fn reader_task<M: DeserializeOwned + Clone + Send + Sync + 'static>(
     messages: broadcast::Sender<M>,
     last_seen: Arc<Mutex<Instant>>,
     conn_alive: CancellationToken,
+    parse_frame: fn(&mut [u8]) -> Vec<M>,
 ) {
+    // 任务独占、跨消息复用的解析缓冲:simd-json 原地消费 buffer,独占后零额外
+    // 拷贝;clear 不还容量,预热后不再分配。
+    let mut buf = Vec::new();
     loop {
         match read.next().await {
             Some(Ok(Message::Text(text))) => {
                 mark_seen(&last_seen);
-                for msg in parse_messages::<M>(text.as_str()) {
+                buf.clear();
+                buf.extend_from_slice(text.as_bytes());
+                for msg in parse_frame(&mut buf) {
                     let _ = messages.send(msg);
                 }
             }
@@ -309,26 +327,7 @@ async fn reader_task<M: DeserializeOwned + Clone + Send + Sync + 'static>(
 }
 
 fn mark_seen(last_seen: &Mutex<Instant>) {
-    *last_seen.lock().unwrap() = Instant::now();
-}
-
-/// Decode a frame's message array; unknown entries are skipped with a warning
-/// so one bad message never kills the stream.
-fn parse_messages<T: DeserializeOwned>(text: &str) -> Vec<T> {
-    let Ok(array) = serde_json::from_str::<Vec<serde_json::Value>>(text) else {
-        warn!("unrecognized stream frame: {text}");
-        return Vec::new();
-    };
-    array
-        .into_iter()
-        .filter_map(|value| match serde_json::from_value(value) {
-            Ok(msg) => Some(msg),
-            Err(err) => {
-                warn!("skipping stream message: {err}");
-                None
-            }
-        })
-        .collect()
+    *lock_ok(last_seen) = Instant::now();
 }
 
 #[cfg(test)]

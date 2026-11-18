@@ -3,7 +3,7 @@
 //! 频道:trades、quotes、minute/daily/updated bars、trade corrections、
 //! trade cancels/errors、LULD bands、trading statuses、order imbalances。
 //!
-//! 连接由 [`supervisor`](crate::supervisor) 监督:断线自动重连(指数退避),
+//! 连接由 `supervisor` 监督:断线自动重连(指数退避),
 //! 重连后自动重放订阅,期间 [`StockStream::status`] 广播 [`StreamStatus`] 事件。
 
 use std::sync::{Arc, Mutex};
@@ -13,6 +13,9 @@ use anyhow::Context as _;
 use chrono::{DateTime, Utc};
 use futures::SinkExt as _;
 use serde::{Deserialize, Serialize};
+use simd_json::prelude::*;
+use simd_json::value::owned::Object as JsonObject;
+use simd_json::OwnedValue;
 use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
@@ -103,7 +106,7 @@ fn merge_channel(target: &mut Vec<String>, symbols: &[String]) {
 }
 
 /// A trade print.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct TradeMessage {
     #[serde(rename = "S")]
     pub symbol: String,
@@ -127,7 +130,7 @@ pub struct TradeMessage {
 }
 
 /// A top-of-book quote.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct QuoteMessage {
     #[serde(rename = "S")]
     pub symbol: String,
@@ -154,7 +157,7 @@ pub struct QuoteMessage {
 }
 
 /// Bar payload shared by the minute / daily / updated bars channels.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct BarMessage {
     #[serde(rename = "S")]
     pub symbol: String,
@@ -179,7 +182,7 @@ pub struct BarMessage {
 }
 
 /// Correction of a previously sent trade.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct CorrectionMessage {
     #[serde(rename = "S")]
     pub symbol: String,
@@ -208,7 +211,7 @@ pub struct CorrectionMessage {
 }
 
 /// Cancellation (`a = "C"`) or error (`a = "E"`) of a previously sent trade.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct CancelErrorMessage {
     #[serde(rename = "S")]
     pub symbol: String,
@@ -230,7 +233,7 @@ pub struct CancelErrorMessage {
 }
 
 /// Limit up / limit down price band.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct LuldMessage {
     #[serde(rename = "S")]
     pub symbol: String,
@@ -250,7 +253,7 @@ pub struct LuldMessage {
 }
 
 /// Trading status (halts, resumes, pauses).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct TradingStatusMessage {
     #[serde(rename = "S")]
     pub symbol: String,
@@ -273,7 +276,7 @@ pub struct TradingStatusMessage {
 }
 
 /// Order imbalance print.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ImbalanceMessage {
     #[serde(rename = "S")]
     pub symbol: String,
@@ -286,7 +289,7 @@ pub struct ImbalanceMessage {
 }
 
 /// Echo of the channels currently active after a subscribe.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubscriptionState {
     #[serde(default)]
@@ -310,7 +313,7 @@ pub struct SubscriptionState {
 }
 
 /// Tagged stock-stream message (`T` discriminator, spec table).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "T")]
 pub enum StockMessage {
     #[serde(rename = "t")]
@@ -363,12 +366,28 @@ struct StockProtocol {
     proxy: Option<String>,
 }
 
+/// `{"action": ..., 各频道: 符号列表}` wire 帧。
+///
+/// 与 serde 版本语义一致:频道名为 camelCase,空频道不出现;直接构造
+/// `OwnedValue` 而非经 serde(控制帧低频,但不留 `expect`,序列化不可能失败)。
 fn action_json(action: &str, subscription: &StockSubscription) -> String {
-    let mut body = serde_json::to_value(subscription).expect("subscription serializes");
-    if let Some(obj) = body.as_object_mut() {
-        obj.insert("action".into(), serde_json::Value::from(action));
+    let mut body = JsonObject::new();
+    body.insert("action".into(), OwnedValue::from(action));
+    for (key, symbols) in [
+        ("trades", &subscription.trades),
+        ("quotes", &subscription.quotes),
+        ("bars", &subscription.bars),
+        ("updatedBars", &subscription.updated_bars),
+        ("dailyBars", &subscription.daily_bars),
+        ("statuses", &subscription.statuses),
+        ("lulds", &subscription.lulds),
+        ("imbalances", &subscription.imbalances),
+    ] {
+        if !symbols.is_empty() {
+            body.insert(key.into(), OwnedValue::from(symbols.clone()));
+        }
     }
-    body.to_string()
+    OwnedValue::from(body).encode()
 }
 
 impl Protocol for StockProtocol {
@@ -385,9 +404,9 @@ impl Protocol for StockProtocol {
     }
 
     async fn handshake(&self, write: &mut crate::ws::WsWriter, read: &mut crate::ws::WsReader) -> anyhow::Result<()> {
-        let auth = serde_json::json!({"action": "auth", "key": self.key_id, "secret": self.secret});
+        let auth = simd_json::json!({"action": "auth", "key": self.key_id, "secret": self.secret});
         write
-            .send(Message::text(auth.to_string()))
+            .send(Message::text(auth.encode()))
             .await
             .context("stock stream: send auth")?;
         wait_control(read, "authenticated")
@@ -415,6 +434,11 @@ impl Protocol for StockProtocol {
             }
         };
         vec![action_json(wire_action, sub)]
+    }
+
+    /// 热路径:tape 快路径解析(`q`/`t` 手工构建,其余 serde 兜底)。
+    fn parse_frame(buf: &mut [u8]) -> Vec<StockMessage> {
+        crate::hotpath::parse_stock_frame(buf)
     }
 }
 
@@ -451,7 +475,7 @@ impl StockStream {
         Self::connect_with_url(STOCK_STREAM_URL, feed, key_id, secret).await
     }
 
-    /// [`connect`] 的自定义端点版本(自建代理 / 沙箱 / 测试服务)。
+    /// [`connect`](Self::connect) 的自定义端点版本(自建代理 / 沙箱 / 测试服务)。
     pub async fn connect_with_url(
         url_base: &str,
         feed: Feed,
@@ -461,7 +485,7 @@ impl StockStream {
         Self::connect_with_url_and_proxy(url_base, feed, key_id, secret, None).await
     }
 
-    /// [`connect_with_url`] 的代理版本。`proxy` 为 `socks5://host:port`
+    /// [`connect_with_url`](Self::connect_with_url) 的代理版本。`proxy` 为 `socks5://host:port`
     /// (SOCKS5,无认证;域名解析发生在代理端);`None` = 直连。显式传入时
     /// 优先于 `ALL_PROXY` / `all_proxy` 环境变量(后者仅在 socks5 scheme 时生效)。
     pub async fn connect_with_url_and_proxy(
@@ -537,7 +561,8 @@ impl StockStream {
         self.inner.messages.subscribe()
     }
 
-    /// 连接状态事件([`StreamStatus`]:Connected / Reconnecting / Closed)。
+    /// 连接状态事件([`StreamStatus`]:Connected / Reconnecting /
+    /// Failed{reason,message} / Closed)。
     pub fn status(&self) -> broadcast::Receiver<StreamStatus> {
         self.inner.status.subscribe()
     }
@@ -560,6 +585,12 @@ impl Drop for StockStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// simd-json 等价解析:wire 帧字符串 → DOM 值。
+    fn parse_dom(text: &str) -> OwnedValue {
+        let mut bytes = text.as_bytes().to_vec();
+        simd_json::to_owned_value(&mut bytes).unwrap()
+    }
 
     fn symbols(sub: &StockSubscription) -> (&[String], &[String]) {
         (&sub.trades, &sub.quotes)
@@ -595,10 +626,10 @@ mod tests {
 
         let replay = StockProtocol::replay(&desired);
         assert_eq!(replay.len(), 1);
-        let json: serde_json::Value = serde_json::from_str(&replay[0]).unwrap();
-        assert_eq!(json["action"], "subscribe");
-        assert_eq!(json["trades"], serde_json::json!(["MSFT"]));
-        // 未订阅的频道不出现(camelCase + skip_serializing_if)。
+        let json = parse_dom(&replay[0]);
+        assert_eq!(json.get("action").and_then(|v| v.as_str()), Some("subscribe"));
+        assert_eq!(json.get("trades"), Some(&simd_json::json!(["MSFT"])));
+        // 未订阅的频道不出现(camelCase + 空频道跳过)。
         assert!(json.get("quotes").is_none());
     }
 
@@ -620,8 +651,8 @@ mod tests {
         );
         assert_eq!(symbols(&desired).0, ["AAPL"]);
         assert_eq!(frames.len(), 1);
-        let json: serde_json::Value = serde_json::from_str(&frames[0]).unwrap();
-        assert_eq!(json["action"], "subscribe");
+        let json = parse_dom(&frames[0]);
+        assert_eq!(json.get("action").and_then(|v| v.as_str()), Some("subscribe"));
 
         let frames = StockProtocol::apply(
             &mut desired,
@@ -631,8 +662,8 @@ mod tests {
             }),
         );
         assert!(symbols(&desired).0.is_empty());
-        let json: serde_json::Value = serde_json::from_str(&frames[0]).unwrap();
-        assert_eq!(json["action"], "unsubscribe");
+        let json = parse_dom(&frames[0]);
+        assert_eq!(json.get("action").and_then(|v| v.as_str()), Some("unsubscribe"));
     }
 
     /// Server keep-alive frames decode into a dedicated variant instead of
@@ -640,11 +671,8 @@ mod tests {
     #[test]
     fn ping_decodes_silently() {
         for text in [r#"[{"T":"ping"}]"#, r#"[{"T":"ping","msg":"hello"}]"#] {
-            let msgs: Vec<StockMessage> = serde_json::from_str::<Vec<serde_json::Value>>(text)
-                .unwrap()
-                .into_iter()
-                .map(serde_json::from_value)
-                .collect::<Result<_, _>>()
+            let mut bytes = text.as_bytes().to_vec();
+            let msgs: Vec<StockMessage> = simd_json::from_slice(&mut bytes)
                 .unwrap_or_else(|err| panic!("{text} should decode: {err}"));
             assert!(matches!(msgs.as_slice(), [StockMessage::Ping {}]), "{text}");
         }
@@ -653,11 +681,10 @@ mod tests {
     /// Trade prints decode with their wire field names.
     #[test]
     fn trade_message_deserializes() {
-        let msg: StockMessage = serde_json::from_value(serde_json::json!({
-            "T": "t", "S": "AAPL", "i": 6913, "x": "D", "p": 182.13, "s": 10,
-            "c": ["@", "F"], "t": "2022-01-03T14:30:00.123Z", "z": "C"
-        }))
-        .unwrap();
+        let mut bytes = br#"{"T": "t", "S": "AAPL", "i": 6913, "x": "D", "p": 182.13, "s": 10,
+            "c": ["@", "F"], "t": "2022-01-03T14:30:00.123Z", "z": "C"}"#
+            .to_vec();
+        let msg: StockMessage = simd_json::from_slice(&mut bytes).unwrap();
         let StockMessage::Trade(trade) = msg else {
             panic!("expected trade, got {msg:?}");
         };

@@ -17,7 +17,10 @@ tokio = { version = "1", features = ["full"] }
 
 ```rust
 let client = anysdk::alpaca_sdk::Client::new(
-    reqwest::Client::new(),
+    // 超时 / 重试 / 代理等传输策略由使用方在自己的 HTTP 客户端上配置
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?,
     "YOUR_API_KEY",
     "YOUR_API_SECRET",
     ReqwestExecutor,
@@ -41,6 +44,7 @@ let client = client.with_data_url("https://paper-api.alpaca.markets");
 | --- | --- |
 | `<域>(&params)` | 多标的,单页(含 `next_page_token`) |
 | `<域>_all(&params)` | 多标的,自动跟踪翻页拉完 |
+| `<域>_all_with_progress(&params, on_page)` | 同上,每拉完一页回调累计条数(仅 `bars_all` 提供带进度变体) |
 | `<域>_single(symbol, &params)` | 单标的,单页 |
 | `<域>_single_all(symbol, &params)` | 单标的,自动翻页拉完 |
 | `latest_<域>(&params)` | 多标的最新值 |
@@ -66,6 +70,11 @@ println!("{:?}", page.next_page_token);
 
 // 自动翻页拉完
 let all: std::collections::HashMap<String, Vec<bars::Bar>> = client.bars_all(&params).await?;
+
+// 带翻页进度:每拉完一页,回调累计已拉取的 bar 条数(原 bars_all 内部委托此方法)
+let all = client.bars_all_with_progress(&params, |fetched| {
+    println!("已拉取 {fetched} 条");
+}).await?;
 
 // 单标的
 let single = client.bars_single_all("AAPL", &bars::SingleParams {
@@ -134,6 +143,6 @@ HTTP 403: {"message":"invalid credentials"}
 ## 测试
 
 ```bash
-cargo test -p alpaca_sdk   # 离线反序列化测试
+cargo test -p alpaca_sdk   # 离线反序列化测试 + mock 执行器驱动的翻页进度测试
 cargo run -p test -- list  # 联网端点回归(需密钥)
 ```

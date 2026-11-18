@@ -6,9 +6,9 @@ AnySDK 是一个基于 Rust 的通用**数据** SDK 工作区,通过统一的 `H
 
 ## 架构
 
-- **不绑定任何 HTTP 客户端**:SDK 只把请求描述为 `utils::Method`(URL + headers),由你为自己的客户端类型实现一次 `HttpExecutor` 即可驱动全部端点;非 2xx 响应由 SDK 统一转为携带 API 原始错误体的错误。
-- **只解析,不转换**:SDK 仅把 JSON / CSV 反序列化为类型化结构体;时间等字段保持数据源的原始值,不做时区换算或语义转换。
-- **自愈式实时流**:`alpaca_stream` 提供股票 / 新闻 WebSocket 流 —— 断线自动重连(指数退避)、主动 ping + 静默检测保活、订阅自动重放、独立连接状态通道。
+- **不绑定任何 HTTP 客户端**:SDK 只把请求描述为 `utils::Method`(URL + headers),由你为自己的客户端类型实现一次 `HttpExecutor` 即可驱动全部端点;非 2xx 响应由 SDK 统一转为携带 API 原始错误体的错误。超时、重试、代理等传输策略同样由你自己的 HTTP 客户端配置(如 `reqwest::Client::builder().timeout(...)`)。
+- **只解析,不转换**:SDK 仅把 JSON / CSV 反序列化为类型化结构体;时间等字段保持数据源的原始值,不做时区换算或语义转换。JSON 解析层为 simd-json(REST 低频路径走 serde 接口)。
+- **自愈式实时流**:`alpaca_stream` 提供股票 / 新闻 WebSocket 流 —— 断线自动重连(指数退避)、主动 ping + 静默检测保活、订阅自动重放、独立连接状态通道(`Failed{reason, message}` 区分认证类永久失败);股票流消息循环用 tape 快路径解析(`q`/`t` 零 DOM 构建,对拍测试保证与 serde 路径一致)。
 
 ## 内容
 
@@ -100,8 +100,9 @@ use anysdk::alpaca_sdk::{snapshots, Feed};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // 超时等传输策略由使用方在自己的 HTTP 客户端上配置
     let client = anysdk::alpaca_sdk::Client::new(
-        reqwest::Client::new(),
+        reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build()?,
         "YOUR_API_KEY",
         "YOUR_API_SECRET",
         ReqwestExecutor,

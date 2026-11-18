@@ -260,6 +260,12 @@ where
 mod tests {
     use super::*;
 
+    /// simd-json 等价解析:样本字符串 → 类型化结构体。
+    fn parse_raw<T: serde::de::DeserializeOwned>(raw: &str) -> T {
+        let mut bytes = raw.as_bytes().to_vec();
+        simd_json::from_slice(&mut bytes).unwrap()
+    }
+
     #[test]
     fn quotes_page_deserializes() {
         let raw = r#"{
@@ -272,7 +278,7 @@ mod tests {
             "next_page_token": null,
             "currency": "USD"
         }"#;
-        let page: QuotesPage = serde_json::from_str(raw).unwrap();
+        let page: QuotesPage = parse_raw(raw);
         let quote = &page.quotes["AAPL"][0];
         assert_eq!(quote.ask_price, 182.13);
         assert_eq!(quote.bid_size, 3);
@@ -287,7 +293,7 @@ mod tests {
                       "bx": "P", "bp": 182.12, "bs": 3, "c": ["R"], "z": "C"},
             "currency": "USD"
         }"#;
-        let latest: LatestQuote = serde_json::from_str(raw).unwrap();
+        let latest: LatestQuote = parse_raw(raw);
         assert_eq!(latest.symbol, "AAPL");
         assert_eq!(latest.quote.bid_price, 182.12);
     }
