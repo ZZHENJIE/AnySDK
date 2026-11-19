@@ -1,6 +1,6 @@
 use crate::Client;
-use utils::HttpExecutor;
 use serde::{Deserialize, Serialize};
+use utils::HttpExecutor;
 
 /// The Finviz Elite export columns, by the index their `c=` parameter
 /// takes: `(index, name)`. The UI's column picker is built from this.
@@ -252,17 +252,6 @@ where
     pub async fn screener(&self, parameter: Parameter) -> anyhow::Result<crate::CSVResult> {
         let bytes = self
             .get_bytes("screener", &format!("v=151&{}", parameter.to_query()))
-            .await?;
-        crate::parse_csv_bytes(&bytes)
-    }
-
-    /// Market screener query with default columns (No. and Ticker)
-    pub async fn market_screener(&self, parameter: Parameter) -> anyhow::Result<crate::CSVResult> {
-        let bytes = self
-            .get_bytes(
-                "screener",
-                &format!("v=151&{}", parameter.market_to_query()),
-            )
             .await?;
         crate::parse_csv_bytes(&bytes)
     }

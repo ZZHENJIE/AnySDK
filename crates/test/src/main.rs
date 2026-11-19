@@ -272,7 +272,10 @@ async fn run_alpaca_stock_stream() -> anyhow::Result<()> {
             Ok(alpaca_stream::StockMessage::Subscription(_)) => {}
             // broadcast 落后(打印太慢被丢帧)只提示,不断流。
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                println!("[{}] [warn] receiver lagged, dropped {n} messages", local_now());
+                println!(
+                    "[{}] [warn] receiver lagged, dropped {n} messages",
+                    local_now()
+                );
             }
             Ok(msg) => println!("[{}] {msg:?}", local_now()),
             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -324,15 +327,15 @@ impl LagStats {
     fn record(&mut self, lag_ms: f64) {
         self.count += 1;
         self.sum_ms += lag_ms;
-        self.min_ms = if self.count == 1 { lag_ms } else { self.min_ms.min(lag_ms) };
+        self.min_ms = if self.count == 1 {
+            lag_ms
+        } else {
+            self.min_ms.min(lag_ms)
+        };
         self.max_ms = self.max_ms.max(lag_ms);
         if lag_ms > 1000.0 {
             self.spikes += 1;
-            println!(
-                "[{}] [spike] lag {:.0} ms (>1s)",
-                local_now(),
-                lag_ms
-            );
+            println!("[{}] [spike] lag {:.0} ms (>1s)", local_now(), lag_ms);
         }
     }
 
@@ -442,20 +445,6 @@ async fn run_finviz_screener() -> anyhow::Result<()> {
         .await?;
     println!("columns: {:?}", result.headers);
     for row in result.rows.iter().take(5) {
-        println!("{row:?}");
-    }
-    Ok(())
-}
-
-async fn run_finviz_market_screener() -> anyhow::Result<()> {
-    let client = finviz_client()?;
-    let result = client
-        .market_screener(Parameter {
-            order_by: "-volume".into(),
-            ..Default::default()
-        })
-        .await?;
-    for row in result.rows.iter().take(10) {
         println!("{row:?}");
     }
     Ok(())
@@ -599,10 +588,6 @@ fn registry() -> BTreeMap<&'static str, Runner> {
         (
             "finviz:screener",
             (|| Box::pin(run_finviz_screener()) as _) as Runner,
-        ),
-        (
-            "finviz:market_screener",
-            (|| Box::pin(run_finviz_market_screener()) as _) as Runner,
         ),
         (
             "finviz:earnings_calendar",

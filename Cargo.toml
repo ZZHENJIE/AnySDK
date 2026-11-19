@@ -36,15 +36,14 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-# —— 仅收录被多个 crate 共用的依赖;单一 crate 专用的依赖放在各自 Cargo.toml ——
 utils = { path = "crates/utils" }
 alpaca_sdk = { path = "crates/alpaca_sdk" }
 alpaca_stream = { path = "crates/alpaca_stream" }
 finviz_sdk = { path = "crates/finviz_sdk" }
 anyhow = "1.0.104"
 serde = { version = "1.0.229", features = ["derive"] }
-simd-json = "0.13"              # utils, alpaca_sdk, alpaca_stream
-urlencoding = "2.1.3"           # utils, finviz_sdk
-chrono = { version = "0.4.45", features = ["serde"] }   # alpaca_sdk, alpaca_stream
-futures = "0.3.34"              # alpaca_stream, test
-tokio = { version = "1", features = ["full"] }   # alpaca_stream, test
+simd-json = "0.13"
+urlencoding = "2.1.3"
+chrono = { version = "0.4.45", features = ["serde"] }
+futures = "0.3.34"
+tokio = { version = "1", features = ["full"] }
